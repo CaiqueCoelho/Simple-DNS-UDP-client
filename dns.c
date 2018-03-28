@@ -13,6 +13,8 @@
 #include <unistd.h> /*  read  */
 #include <netdb.h>
 #include <stdbool.h>
+#include <signal.h>
+#include <fcntl.h> //fcntl
 
 #define BUFSIZE 1024
 #define T_A 1 //Ipv4 address
@@ -22,6 +24,8 @@
 #define T_PTR 12 /* domain name pointer */
 #define T_MX 15 //Mail server
 #define T_AAAA 28
+
+int flag = 0;
 
 //DNS header structure
 struct DNS_HEADER
@@ -77,6 +81,16 @@ void error(char *msg) {
     exit(0);
 }
 
+void  ALARMhandler(int sig)
+{
+    signal(SIGALRM, SIG_IGN);          /* ignore this signal       */
+    printf("AAAA <none>\n\n");
+    printf("Deu alarme\n");
+    flag = 1;
+    signal(SIGALRM, ALARMhandler);     /* reinstall the handler    */
+    exit(1);
+}
+
 void ChangetoDnsNameFormat(unsigned char* dns,unsigned char* host) 
 {
     int lock = 0 , i;
@@ -97,6 +111,19 @@ void ChangetoDnsNameFormat(unsigned char* dns,unsigned char* host)
     *dns++='\0';
 }
 
+static void print_buffer(char *buffer, int nBytes){
+
+    int count = 0;
+
+    //nBytes - 4 para desconsiderar o fim do vertor "0x00"
+    while(count <= nBytes - 4){
+        printf("%x ", (unsigned char)buffer[count]);
+        count++;
+    }
+    printf("\n");
+
+}
+
 static void usage (char *program)
 {
     printf ("usage: %s www.terra.com.br\n", program);
@@ -108,6 +135,7 @@ static void usage (char *program)
 static void *filtroDominio(char *manipular, char *dominio){
 
     int tam = strlen(manipular);
+    strcpy(dominio, "" );
 
     if(manipular[tam-1] == '.'){
         strncpy(dominio, manipular, tam-1);
@@ -118,6 +146,7 @@ static void *filtroDominio(char *manipular, char *dominio){
     }
 
 }
+
 
 int main(int argc, char **argv) {
     int sockfd, port = 53, n;
@@ -131,10 +160,11 @@ int main(int argc, char **argv) {
     size_t num_sent;
     struct DNS_HEADER *dns = NULL;
     struct QUESTION *qinfo = NULL;
+    char bufServerReply[BUFSIZE];
+    int size_recv , total_size= 0;
+    char addr[INET_ADDRSTRLEN];
 
-    int query_type_1 = T_A;
-    int query_type_2 = T_AAAA;
-    int query_type_3 = T_MX;
+    int query_type = T_AAAA;
 
     unsigned char buf[65536],*qname,*reader;
     int i , j , stop , s;
@@ -151,7 +181,6 @@ int main(int argc, char **argv) {
     int tam = strlen(argv[1]);
     char dominio[BUFSIZE] = "";
     filtroDominio(argv[1], dominio);
-    printf("DOMINIO: %s\n", dominio);
 
     // Fill query structure
     //Set the DNS structure to standard queries
@@ -177,9 +206,11 @@ int main(int argc, char **argv) {
     qname =(unsigned char*)&buf[sizeof(struct DNS_HEADER)];
  
     ChangetoDnsNameFormat(qname , dominio);
+    int tamDominio = strlen(dominio);
+    dominio[tamDominio-1] = '\0';
     qinfo =(struct QUESTION*)&buf[sizeof(struct DNS_HEADER) + (strlen((const char*)qname) + 1)]; //fill it
  
-    qinfo->qtype = htons( query_type_1 ); //type of the query , A , MX , CNAME , NS etc
+    qinfo->qtype = htons( query_type); //type of the query , A , MX , CNAME , NS etc
     qinfo->qclass = htons(1); //its internet (lol)
 
 
@@ -191,23 +222,37 @@ int main(int argc, char **argv) {
 
     /* socket: create the socket */
     sockfd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    //sockfd = socket(AF_INET, SOCK_STREAM,0);
+    //sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) 
         error("ERROR opening socket");
     
     //memset(&serveraddr, 0, sizeof(serveraddr));
+    bzero(&serveraddr, sizeof(serveraddr));
     serveraddr.sin_family = AF_INET;
+    //serveraddr.sin_len = sizeof(serveraddr);
+    //serverAddr.sin_addr.s_addr = inet_addr()
+    serveraddr.sin_addr.s_addr=htonl(INADDR_ANY);
+    serveraddr.sin_port = htons(port);
     memcpy(&serveraddr.sin_addr.s_addr,
             dominio_ip->h_addr_list[0],
             sizeof(struct in_addr));
-    serveraddr.sin_port = htons(port);
+    //serveraddr.sin_addr.s_addr=htonl(INADDR_ANY);
 
+    /* Fazendo a conexao com o sender*/
+    if(connect(sockfd, (struct sockaddr *)&serveraddr, sizeof(serveraddr))<0)
+    {
+        printf("\n Erro : Conexao com o sender falhou \n");
+        return 1;
+    }
 
-        printf("I am about to send%s to IP address %s and port %d\n with Type A",
-            msg, inet_ntoa(serveraddr.sin_addr), 53);
+    //faz o socket nao blockear
+    //fcntl(sockfd, F_SETFL, O_NONBLOCK);
+        
+    printf("I am about to send request to IP address %s and port %d with Type AAAA",
+        inet_ntoa(serveraddr.sin_addr), port);
 
-    //num_to_send = sizeof(query);
-
-    printf("\nSending Packet...");
+    printf("\nSending Packet...\n");
     if( sendto(sockfd,(char*)buf,sizeof(struct DNS_HEADER) + (strlen((const char*)qname)+1) + sizeof(struct QUESTION),0,(struct sockaddr*)&serveraddr,sizeof(serveraddr)) < 0)
     {
         perror("sendto failed");
@@ -216,35 +261,31 @@ int main(int argc, char **argv) {
 
     sleep(2);
 
-    printf("I am about to send%s to IP address %s and port %d\n with Type AAAA",
-            msg, inet_ntoa(serveraddr.sin_addr), 53);
+    /*
+    if(!inet_ntop(dominio_ip->h_addrtype, &serveraddr, addr, INET_ADDRSTRLEN)){
+        perror("inet_ntop");
+        exit(EXIT_FAILURE);
+    }*/
 
-    qinfo->qtype = htons( query_type_2 ); //type of the query , A , MX , CNAME , NS etc
-    qinfo->qclass = htons(1); //its internet (lol)
+    printf("Done\n");
 
-    printf("\nSending Packet...");
-    if( sendto(sockfd,(char*)buf,sizeof(struct DNS_HEADER) + (strlen((const char*)qname)+1) + sizeof(struct QUESTION),0,(struct sockaddr*)&serveraddr,sizeof(serveraddr)) < 0)
+    signal(SIGALRM, ALARMhandler);
+    alarm(10);
+
+    //Receive the answer
+    //int tam_sender = sizeof(struct sockaddr_in);
+    i = sizeof serveraddr;
+    printf("\nTrying Receiving answer...\n");
+    printf("%s:\n", dominio);
+    if(recvfrom (sockfd, (char*)buf, 65536 , 0 , (struct sockaddr*)&serveraddr , (socklen_t*)&i) < 0)
     {
-        perror("sendto failed");
+        perror("recvfrom failed");
         exit(1);
     }
+    printf("AAAA");
+    //print_buffer(bufServerReply, BUFSIZE);
 
-    sleep(2);
-
-    printf("I am about to send%s to IP address %s and port %d\n with Type MX",
-        msg, inet_ntoa(serveraddr.sin_addr), 53);
-
-    qinfo->qtype = htons( query_type_3 ); //type of the query , A , MX , CNAME , NS etc
-    qinfo->qclass = htons(1); //its internet (lol)
-
-    printf("\nSending Packet...");
-    if( sendto(sockfd,(char*)buf,sizeof(struct DNS_HEADER) + (strlen((const char*)qname)+1) + sizeof(struct QUESTION),0,(struct sockaddr*)&serveraddr,sizeof(serveraddr)) < 0)
-    {
-        perror("sendto failed");
-        exit(1);
-    }
-
-    printf("Done");
+    printf("\nDone");
 
     return 0;
 }
